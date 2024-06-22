@@ -132,7 +132,7 @@ static void loop_global_unlock(struct loop_device *lo, bool global)
 		mutex_unlock(&loop_validate_mutex);
 }
 
-static int max_part;
+static int max_part = 7;
 static int part_shift;
 
 static int transfer_xor(struct loop_device *lo, int cmd,
@@ -2182,44 +2182,41 @@ static blk_status_t loop_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 static void loop_handle_cmd(struct loop_cmd *cmd)
 {
-	struct cgroup_subsys_state *cmd_blkcg_css = cmd->blkcg_css;
-	struct cgroup_subsys_state *cmd_memcg_css = cmd->memcg_css;
 	struct request *rq = blk_mq_rq_from_pdu(cmd);
 	const bool write = op_is_write(req_op(rq));
 	struct loop_device *lo = rq->q->queuedata;
 	int ret = 0;
 	struct mem_cgroup *old_memcg = NULL;
-	const bool use_aio = cmd->use_aio;
+	struct cgroup_subsys_state *old_memcg_css, *new_memcg_css;
 
 	if (write && (lo->lo_flags & LO_FLAGS_READ_ONLY)) {
 		ret = -EIO;
 		goto failed;
 	}
 
-	if (cmd_blkcg_css)
-		kthread_associate_blkcg(cmd_blkcg_css);
-	if (cmd_memcg_css)
+	if (cmd->blkcg_css)
+		kthread_associate_blkcg(cmd->blkcg_css);
+	if (cmd->memcg_css)
 		old_memcg = set_active_memcg(
-			mem_cgroup_from_css(cmd_memcg_css));
+			mem_cgroup_from_css(cmd->memcg_css));
 
-	/*
-	 * do_req_filebacked() may call blk_mq_complete_request() synchronously
-	 * or asynchronously if using aio. Hence, do not touch 'cmd' after
-	 * do_req_filebacked() has returned unless we are sure that 'cmd' has
-	 * not yet been completed.
-	 */
 	ret = do_req_filebacked(lo, rq);
 
-	if (cmd_blkcg_css)
+	if (cmd->blkcg_css)
 		kthread_associate_blkcg(NULL);
 
-	if (cmd_memcg_css) {
+	old_memcg_css = cmd->memcg_css;
+	if (old_memcg_css) {
 		set_active_memcg(old_memcg);
-		css_put(cmd_memcg_css);
+		new_memcg_css = cmd->memcg_css;
+		if (!new_memcg_css || (new_memcg_css != old_memcg_css)) {
+			pr_err("[%s] %px %px", __func__, new_memcg_css, old_memcg_css);
+		}
+		css_put(cmd->memcg_css);
 	}
  failed:
 	/* complete non-aio request */
-	if (!use_aio || ret) {
+	if (!cmd->use_aio || ret) {
 		if (ret == -EOPNOTSUPP)
 			cmd->ret = ret;
 		else
